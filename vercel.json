@@ -15,7 +15,7 @@
   ],
   "env": {
     "SECRET_KEY": "your_secret_key",
-    "WEBHOOK_URL": "https://webhook.lewisakura.moe/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN/queue",
+    "WEBHOOK_URL": "https://discord.com/api/webhooks/1284462298366349408/AAPpWGy02B4scC5UoTwNvhcH_1IC27iQy87yBVjGfPdkD7ZZ0EvE-dUli6tk146BdBiI",
     "SLACK_URL": "",
     "TELEGRAM_ENABLED": "False",
     "TELEGRAM_BOT_TOKEN": "",
