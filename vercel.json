@@ -1,20 +1,25 @@
 {
   "version": 2,
-  "framework": "flask",
   "builds": [
     {
-      "src": "app.py",
+      "src": "api/index.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "app.py"
+      "dest": "api/index.py"
     }
   ],
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  },
   "env": {
-    "SECRET_KEY": "your_secret_key",
+    "SECRET_KEY": "your_very_secret_key_here_change_this",
     "WEBHOOK_URL": "https://discord.com/api/webhooks/1284462298366349408/AAPpWGy02B4scC5UoTwNvhcH_1IC27iQy87yBVjGfPdkD7ZZ0EvE-dUli6tk146BdBiI",
     "SLACK_URL": "",
     "TELEGRAM_ENABLED": "False",
@@ -25,6 +30,7 @@
     "EMAIL_SMTP_PORT": "587",
     "EMAIL_SENDER": "your_email@gmail.com",
     "EMAIL_PASSWORD": "your_app_password",
-    "EMAIL_RECEIVER": "your_email@gmail.com"
+    "EMAIL_RECEIVER": "your_email@gmail.com",
+    "PYTHON_VERSION": "3.9"
   }
 }
