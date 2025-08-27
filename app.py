@@ -1,3 +1,10 @@
+import os
+import sys
+from pathlib import Path
+
+# Add the current directory to Python path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 from flask import Flask, request, render_template_string, send_file, session, redirect, url_for, jsonify
 import aiohttp
 import asyncio
@@ -10,19 +17,24 @@ import threading
 import smtplib
 import re
 import json
-import os
 from email.mime.text import MIMEText
 from collections import deque
 import base64
 import hashlib
 from datetime import datetime
 
-app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "your_secret_key")  # Set via Vercel env
+# Vercel-specific configuration
+if os.environ.get('VERCEL'):
+    CONFIG_FILE = "/tmp/config.json"
+    HISTORY_FILE = "/tmp/history.json"
+else:
+    CONFIG_FILE = "config.json"
+    HISTORY_FILE = "history.json"
 
-# Configuration (load from environment or config.json)
-CONFIG_FILE = "config.json"
-HISTORY_FILE = "history.json"
+app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "your_secret_key")
+
+# Configuration
 DEFAULT_CONFIG = {
     "webhook_url": os.getenv("WEBHOOK_URL", "https://webhook.lewisakura.moe/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN/queue"),
     "slack_url": os.getenv("SLACK_URL", ""),
@@ -46,12 +58,19 @@ DEFAULT_CONFIG = {
     "webhook_rate": 10,
     "export_schedule": None,
     "notification_channels": {"discord": True, "telegram": False, "slack": False, "email": False},
-    "dedup_window": 3600  # 1 hour
+    "dedup_window": 3600
 }
-if os.path.exists(CONFIG_FILE):
-    with open(CONFIG_FILE, 'r') as f:
-        config = json.load(f)
-else:
+
+# Try to load config, create if doesn't exist
+try:
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f:
+            config = json.load(f)
+    else:
+        config = DEFAULT_CONFIG
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+except:
     config = DEFAULT_CONFIG
 
 PROXY_LIST_URL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"
@@ -62,6 +81,17 @@ DEFAULT_MAX_RESULTS = 5
 DEFAULT_ACTIVITY_DAYS = 30
 DEFAULT_GROUP_ID_RANGE = (1, 1000)
 DEFAULT_SCORE_WEIGHTS = {"members": 0.001, "name_length": 5.0}
+DEFAULT_WEBHOOK_TEMPLATE = (
+    "**High-Value Group Found via '{keyword}'! (Score: {score:.1f})**\n"
+    "**Name**: {name}\n"
+    "**Group ID**: {id}\n"
+    "**Members**: {members}\n"
+    "**Open to Join**: {open}\n"
+    "**Recent Shout**: {shout}\n"
+    "**Description**: {description}\n"
+    "**Link**: https://www.roblox.com/groups/{id}\n"
+    "Manually join and claim!"
+)
 KEYWORD_SYNONYMS = {
     "abandoned": ["unused", "empty", "forgotten"],
     "free": ["open", "available"],
@@ -69,6 +99,7 @@ KEYWORD_SYNONYMS = {
     "clan": ["tribe", "guild"],
     "group": ["community", "team"]
 }
+
 cache = cachetools.TTLCache(maxsize=1000, ttl=3600)
 keyword_cache = cachetools.TTLCache(maxsize=100, ttl=3600)
 status_log = []
@@ -79,26 +110,32 @@ api_calls_made = 0
 api_calls_limit = 100
 api_reset_time = time.time() + 60
 history_log = []
-notification_sent = {}  # Track sent notifications
+notification_sent = {}
 background_task_running = False
 analytics_data = {"groups_found": 0, "last_hour": []}
 
 # Load history
-if os.path.exists(HISTORY_FILE):
-    with open(HISTORY_FILE, 'r') as f:
-        history_log = json.load(f)
+try:
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, 'r') as f:
+            history_log = json.load(f)
+except:
+    history_log = []
 
-# Save config
 def save_config():
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=2)
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        status_log.append(f"Config save failed: {e}")
 
-# Save history
 def save_history():
-    with open(HISTORY_FILE, 'w') as f:
-        json.dump(history_log, f, indent=2)
+    try:
+        with open(HISTORY_FILE, 'w') as f:
+            json.dump(history_log, f, indent=2)
+    except Exception as e:
+        status_log.append(f"History save failed: {e}")
 
-# Admin authentication decorator
 def admin_required(role="view"):
     def decorator(f):
         def wrap(*args, **kwargs):
@@ -112,7 +149,6 @@ def admin_required(role="view"):
         return wrap
     return decorator
 
-# Fetch and validate proxies
 async def fetch_proxies(session):
     global proxy_stats
     try:
@@ -136,7 +172,6 @@ async def fetch_proxies(session):
         status_log.append(f"Proxy fetch error: {e}")
         return []
 
-# Check proxy
 async def check_proxy(session, proxy):
     try:
         async with session.get("https://www.google.com", proxy=proxy, timeout=5) as response:
@@ -144,7 +179,6 @@ async def check_proxy(session, proxy):
     except:
         return False
 
-# Send email notification
 def send_email(subject, body):
     if not config["email"]["enabled"] or not config["notification_channels"]["email"]:
         return
@@ -161,7 +195,6 @@ def send_email(subject, body):
     except Exception as e:
         status_log.append(f"Email failed: {e}")
 
-# Send Telegram notification
 async def send_telegram(session, message):
     if not config["telegram"]["enabled"] or not config["notification_channels"]["telegram"]:
         return
@@ -177,7 +210,6 @@ async def send_telegram(session, message):
     except Exception as e:
         status_log.append(f"Telegram error: {e}")
 
-# Send Slack notification
 async def send_slack(session, message):
     if not config["slack_url"] or not config["notification_channels"]["slack"]:
         return
@@ -190,7 +222,6 @@ async def send_slack(session, message):
     except Exception as e:
         status_log.append(f"Slack error: {e}")
 
-# Async function to send Discord webhook
 async def send_webhook(session, group_data, template, priority=False, min_score=0):
     if group_data['score'] < min_score:
         return
@@ -234,7 +265,6 @@ async def send_webhook(session, group_data, template, priority=False, min_score=
     except Exception as e:
         status_log.append(f"Direct webhook failed: {e}")
 
-# Batch Discord webhook
 async def send_batch_webhook(session, groups, template, min_score=0):
     groups = [g for g in groups if g['score'] >= min_score and (g['id'] not in notification_sent or time.time() - notification_sent[g['id']] >= config["dedup_window"])]
     if not groups:
@@ -274,7 +304,6 @@ async def send_batch_webhook(session, groups, template, min_score=0):
     except Exception as e:
         status_log.append(f"Direct batch webhook failed: {e}")
 
-# Process webhook queue with rate limiting
 async def process_webhook_queue():
     async with aiohttp.ClientSession() as session:
         webhooks_sent = 0
@@ -305,7 +334,6 @@ async def process_webhook_queue():
                 batch = []
             await asyncio.sleep(0.1)
 
-# Async function to check multiple groups
 async def check_groups(session, group_ids, keyword, regex_pattern, activity_days, score_weights):
     global api_calls_made, api_calls_limit, api_reset_time, analytics_data
     if not group_ids:
@@ -383,7 +411,6 @@ async def check_groups(session, group_ids, keyword, regex_pattern, activity_days
     save_history()
     return results
 
-# Async function to scan group ID range
 async def scan_group_ids(session, start_id, end_id, regex_pattern, activity_days, score_weights):
     chunk_size = 100
     tasks = []
@@ -392,7 +419,6 @@ async def scan_group_ids(session, start_id, end_id, regex_pattern, activity_days
         tasks.append(check_groups(session, chunk_ids, "ID Scan", regex_pattern, activity_days, score_weights))
     return [item for sublist in await asyncio.gather(*tasks) for item in sublist]
 
-# Async function to search groups
 async def search_groups(keywords, min_members, regex_pattern, max_results, activity_days, score_weights, group_id_range, min_score):
     global api_calls_made, api_calls_limit, api_reset_time
     results = []
@@ -444,40 +470,43 @@ async def search_groups(keywords, min_members, regex_pattern, max_results, activ
         
     return sorted(results, key=lambda x: x.get('score', 0), reverse=True)
 
-# Async function to export history periodically
 async def export_history_periodically():
     while config["export_schedule"]:
         await asyncio.sleep(config["export_schedule"]["interval"])
         output = io.StringIO()
+        
         if config["export_schedule"]["format"] == "csv":
             writer = csv.DictWriter(output, fieldnames=['keyword', 'id', 'name', 'members', 'ownerless', 'open', 'unique', 'active', 'score', 'shout', 'description', 'link', 'timestamp'])
             writer.writeheader()
             for result in history_log:
                 writer.writerow(result)
             filename = "history.csv"
-            mimetype = "text/csv"
-        else:
-            output.write("# Search History\n\n")
-            output.write("| Keyword | Name | Members | Ownerless | Open | Unique | Active | Score | Shout | Description | Link | Timestamp |\n")
-            output.write("|---------|------|---------|-----------|------|--------|--------|-------|-------|-------------|------|---------|\n")
-            for result in history_log:
-                output.write(f"| {result['keyword']} | {result['name']} | {result['members']} | {'Yes' if result['ownerless'] else 'No'} | {'Yes' if result['open'] else 'No'} | {'Yes' if result['unique'] else 'No'} | {'Yes' if result['active'] else 'No'} | {result['score']:.1f} | {result['shout']} | {result['description']} | [View]({result['link']}) | {result['timestamp']} |\n")
+            content_type = "text/csv"
+        else:  # Markdown format
+            output.write("# Scheduled History Export\n\n")
+            output.write(f"*Generated on: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}*\n\n")
+            output.write("| Keyword | Name | Members | Ownerless | Open | Score | Timestamp |\n")
+            output.write("|---------|------|---------|-----------|------|-------|-----------|\n")
+            for result in history_log[-50:]:  # Last 50 entries
+                output.write(f"| {result['keyword']} | {result['name']} | {result['members']} | {'Yes' if result['ownerless'] else 'No'} | {'Yes' if result['open'] else 'No'} | {result['score']:.1f} | {result['timestamp']} |\n")
             filename = "history.md"
-            mimetype = "text/markdown"
+            content_type = "text/markdown"
         
         output.seek(0)
         content = output.getvalue()
+        
+        # Send via configured channel
         if config["export_schedule"]["destination"] == "email" and config["email"]["enabled"]:
-            send_email("Scheduled History Export", content)
+            send_email(f"Scheduled History Export - {filename}", content)
         elif config["export_schedule"]["destination"] == "telegram" and config["telegram"]["enabled"]:
             async with aiohttp.ClientSession() as session:
                 await send_telegram(session, content[:2000])
         elif config["export_schedule"]["destination"] == "slack" and config["slack_url"]:
             async with aiohttp.ClientSession() as session:
                 await send_slack(session, content[:2000])
+        
         status_log.append(f"Scheduled export sent as {filename}")
 
-# Background tasks
 async def refresh_proxies_periodically():
     async with aiohttp.ClientSession() as session:
         while True:
@@ -487,6 +516,10 @@ async def refresh_proxies_periodically():
 
 def background_tasks():
     global background_task_running
+    if os.environ.get('VERCEL'):
+        status_log.append("Background tasks disabled on Vercel")
+        return
+        
     background_task_running = True
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -501,7 +534,6 @@ def background_tasks():
         loop.run_until_complete(search_groups(DEFAULT_SEARCH_KEYWORDS, DEFAULT_MIN_MEMBERS, DEFAULT_REGEX_PATTERN, DEFAULT_MAX_RESULTS, DEFAULT_ACTIVITY_DAYS, DEFAULT_SCORE_WEIGHTS, DEFAULT_GROUP_ID_RANGE, 0))
         time.sleep(config["check_interval"])
 
-# Admin login route
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     if request.method == 'POST':
@@ -537,7 +569,6 @@ def admin_login():
     </html>
     ''')
 
-# Admin panel route
 @app.route('/admin', methods=['GET', 'POST'])
 @admin_required(role="full")
 def admin():
@@ -578,14 +609,19 @@ def admin():
             background_task_running = False
             status_log.append("Background task stopped")
         elif action == "start_task":
-            if not background_task_running:
+            if not background_task_running and not os.environ.get('VERCEL'):
                 threading.Thread(target=background_tasks, daemon=True).start()
                 status_log.append("Background task started")
+            elif os.environ.get('VERCEL'):
+                status_log.append("Background tasks not supported on Vercel")
         elif action == "restart_task":
             background_task_running = False
             time.sleep(1)
-            threading.Thread(target=background_tasks, daemon=True).start()
-            status_log.append("Background task restarted")
+            if not os.environ.get('VERCEL'):
+                threading.Thread(target=background_tasks, daemon=True).start()
+                status_log.append("Background task restarted")
+            else:
+                status_log.append("Background tasks not supported on Vercel")
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -597,11 +633,15 @@ def admin():
             form { margin-bottom: 20px; }
             .log { font-size: 0.9em; color: #555; }
             button { padding: 10px; margin-right: 10px; }
+            .warning { color: orange; font-weight: bold; }
         </style>
     </head>
     <body>
         <h1>Admin Panel</h1>
         <p><a href="{{ url_for('home') }}">Back to Main</a> | <a href="{{ url_for('analytics') }}">Analytics</a></p>
+        {% if os.environ.get('VERCEL') %}
+        <p class="warning">⚠️ Running on Vercel: Background tasks are disabled</p>
+        {% endif %}
         <h2>Configuration</h2>
         <form method="POST">
             <input type="hidden" name="action" value="update_config">
@@ -638,7 +678,7 @@ def admin():
         <h2>Task Control</h2>
         <form method="POST">
             <input type="hidden" name="action" value="start_task">
-            <button type="submit">Start Background Task</button>
+            <button type="submit" {% if os.environ.get('VERCEL') %}disabled title="Not supported on Vercel"{% endif %}>Start Background Task</button>
         </form>
         <form method="POST">
             <input type="hidden" name="action" value="stop_task">
@@ -646,7 +686,7 @@ def admin():
         </form>
         <form method="POST">
             <input type="hidden" name="action" value="restart_task">
-            <button type="submit">Restart Background Task</button>
+            <button type="submit" {% if os.environ.get('VERCEL') %}disabled title="Not supported on Vercel"{% endif %}>Restart Background Task</button>
         </form>
         <h2>Status Log</h2>
         <div class="log">
@@ -655,13 +695,15 @@ def admin():
             {% endfor %}
         </div>
         <form action="/export_logs" method="POST">
-            <button type="submit">Export Full Log</button>
+            <button type="submit">Export Full Log (CSV)</button>
+        </form>
+        <form action="/export_logs_md" method="POST">
+            <button type="submit">Export Full Log (Markdown)</button>
         </form>
     </body>
     </html>
     ''', config=config, status_log=status_log)
 
-# Analytics route
 @app.route('/analytics', methods=['GET'])
 @admin_required(role="view")
 def analytics():
@@ -691,13 +733,11 @@ def analytics():
     </html>
     ''', analytics_data=analytics_data, last_hour_count=last_hour_count)
 
-# API endpoint for groups
 @app.route('/api/groups', methods=['GET'])
 @admin_required(role="view")
 def api_groups():
-    return jsonify(history_log[-50:])  # Last 50 groups
+    return jsonify(history_log[-50:])
 
-# Route for home page
 @app.route('/', methods=['GET', 'POST'])
 def home():
     keywords = DEFAULT_SEARCH_KEYWORDS
@@ -705,17 +745,7 @@ def home():
     regex_pattern = DEFAULT_REGEX_PATTERN
     max_results = DEFAULT_MAX_RESULTS
     activity_days = DEFAULT_ACTIVITY_DAYS
-    webhook_template = (
-        "**High-Value Group Found via '{keyword}'! (Score: {score:.1f})**\n"
-        "**Name**: {name}\n"
-        "**Group ID**: {id}\n"
-        "**Members**: {members}\n"
-        "**Open to Join**: {open}\n"
-        "**Recent Shout**: {shout}\n"
-        "**Description**: {description}\n"
-        "**Link**: https://www.roblox.com/groups/{id}\n"
-        "Manually join and claim!"
-    )
+    webhook_template = DEFAULT_WEBHOOK_TEMPLATE
     score_weights = DEFAULT_SCORE_WEIGHTS
     group_id_range = DEFAULT_GROUP_ID_RANGE
     min_score = 0
@@ -760,10 +790,14 @@ def home():
             textarea { width: 100%; height: 100px; }
             .progress-bar { width: 100%; background-color: #f3f3f3; border-radius: 5px; }
             .progress-fill { height: 20px; background-color: #4caf50; border-radius: 5px; }
+            .warning { color: orange; font-weight: bold; }
         </style>
     </head>
     <body>
         <h1>Roblox Ownerless Group Finder</h1>
+        {% if os.environ.get('VERCEL') %}
+        <p class="warning">⚠️ Running on Vercel: Background scanning disabled. Use manual search.</p>
+        {% endif %}
         <p>Search for ownerless groups with ultra-fast scanning, customizable notifications (Discord/Telegram/Slack/email), and Proxifly proxies (no signup). Manually claim via links.</p>
         <p><a href="{{ url_for('admin_login') }}">Admin Panel</a></p>
         <p><strong>API Usage:</strong> {{ api_calls_made }}/{{ api_calls_limit }} calls (resets in {{ (api_reset_time - time.time()) | round(1) }}s)</p>
@@ -793,7 +827,10 @@ def home():
             <button type="submit">Export Results to Markdown</button>
         </form>
         <form action="/export_history" method="POST">
-            <button type="submit">Export Search History</button>
+            <button type="submit">Export Search History (CSV)</button>
+        </form>
+        <form action="/export_history_md" method="POST">
+            <button type="submit">Export Search History (Markdown)</button>
         </form>
         
         {% if results %}
@@ -842,7 +879,6 @@ def home():
     </html>
     ''', keywords=keywords, min_members=min_members, regex_pattern=regex_pattern, max_results=max_results, activity_days=activity_days, webhook_template=webhook_template, score_weights=score_weights, group_id_range=group_id_range, min_score=min_score, results=results, status_log=status_log, api_calls_made=api_calls_made, api_calls_limit=api_calls_limit, api_reset_time=api_reset_time)
 
-# Route to export results as CSV
 @app.route('/export_csv', methods=['POST'])
 def export_csv():
     results = request.form.get('results')
@@ -864,7 +900,6 @@ def export_csv():
         download_name='group_results.csv'
     )
 
-# Route to export results as Markdown
 @app.route('/export_md', methods=['POST'])
 def export_md():
     results = request.form.get('results')
@@ -873,21 +908,50 @@ def export_md():
     
     results = json.loads(results)
     output = io.StringIO()
+    
+    # Create markdown content
     output.write("# Roblox Group Finder Results\n\n")
-    output.write("| Keyword | Name | Members | Ownerless | Open | Unique | Active | Score | Shout | Description | Link | Timestamp |\n")
-    output.write("|---------|------|---------|-----------|------|--------|--------|-------|-------|-------------|------|---------|\n")
-    for result in results:
-        output.write(f"| {result['keyword']} | {result['name']} | {result['members']} | {'Yes' if result['ownerless'] else 'No'} | {'Yes' if result['open'] else 'No'} | {'Yes' if result['unique'] else 'No'} | {'Yes' if result['active'] else 'No'} | {result['score']:.1f} | {result['shout']} | {result['description']} | [View]({result['link']}) | {result['timestamp']} |\n")
+    output.write(f"*Generated on: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}*\n\n")
+    
+    if results:
+        output.write("## Summary\n")
+        output.write(f"- **Total Groups Found**: {len(results)}\n")
+        output.write(f"- **Ownerless Groups**: {len([r for r in results if r['ownerless']])}\n")
+        output.write(f"- **Open Groups**: {len([r for r in results if r['open']])}\n")
+        output.write(f"- **Active Groups**: {len([r for r in results if r['active']])}\n\n")
+        
+        output.write("## Group Details\n\n")
+        output.write("| Keyword | Name | Members | Ownerless | Open | Unique | Active | Score | Link |\n")
+        output.write("|---------|------|---------|-----------|------|--------|--------|-------|------|\n")
+        
+        for result in results:
+            output.write(f"| {result['keyword']} | {result['name']} | {result['members']} | {'✅' if result['ownerless'] else '❌'} | {'✅' if result['open'] else '❌'} | {'✅' if result['unique'] else '❌'} | {'✅' if result['active'] else '❌'} | {result['score']:.1f} | [View]({result['link']}) |\n")
+        
+        output.write("\n## Detailed Information\n\n")
+        for i, result in enumerate(results, 1):
+            output.write(f"### {i}. {result['name']} (ID: {result['id']})\n")
+            output.write(f"- **Keyword**: {result['keyword']}\n")
+            output.write(f"- **Members**: {result['members']}\n")
+            output.write(f"- **Ownerless**: {'Yes' if result['ownerless'] else 'No'}\n")
+            output.write(f"- **Open to Join**: {'Yes' if result['open'] else 'No'}\n")
+            output.write(f"- **Unique Name**: {'Yes' if result['unique'] else 'No'}\n")
+            output.write(f"- **Active**: {'Yes' if result['active'] else 'No'}\n")
+            output.write(f"- **Score**: {result['score']:.1f}\n")
+            output.write(f"- **Shout**: {result['shout']}\n")
+            output.write(f"- **Description**: {result['description']}\n")
+            output.write(f"- **Link**: {result['link']}\n")
+            output.write(f"- **Timestamp**: {result['timestamp']}\n\n")
+    else:
+        output.write("No groups found matching your criteria.\n")
     
     output.seek(0)
     return send_file(
         io.BytesIO(output.getvalue().encode('utf-8')),
         mimetype='text/markdown',
         as_attachment=True,
-        download_name='group_results.md'
+        download_name=f'roblox_groups_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.md'
     )
 
-# Route to export history
 @app.route('/export_history', methods=['POST'])
 def export_history():
     output = io.StringIO()
@@ -904,7 +968,82 @@ def export_history():
         download_name='history.csv'
     )
 
-# Route to export logs
+@app.route('/export_history_md', methods=['POST'])
+def export_history_md():
+    output = io.StringIO()
+    
+    # Create markdown content
+    output.write("# Roblox Group Finder - Search History\n\n")
+    output.write(f"*Generated on: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}*\n\n")
+    output.write(f"*Total searches in history: {len(history_log)}*\n\n")
+    
+    if history_log:
+        # Summary statistics
+        ownerless_count = len([r for r in history_log if r['ownerless']])
+        open_count = len([r for r in history_log if r['open']])
+        active_count = len([r for r in history_log if r['active']])
+        
+        output.write("## Summary Statistics\n")
+        output.write(f"- **Total Searches**: {len(history_log)}\n")
+        output.write(f"- **Ownerless Groups Found**: {ownerless_count}\n")
+        output.write(f"- **Open Groups Found**: {open_count}\n")
+        output.write(f"- **Active Groups Found**: {active_count}\n")
+        output.write(f"- **Success Rate**: {(ownerless_count/len(history_log)*100 if history_log else 0):.1f}%\n\n")
+        
+        # Group by keyword
+        output.write("## Results by Keyword\n")
+        keyword_stats = {}
+        for result in history_log:
+            keyword = result['keyword']
+            if keyword not in keyword_stats:
+                keyword_stats[keyword] = {'count': 0, 'ownerless': 0, 'open': 0, 'active': 0}
+            keyword_stats[keyword]['count'] += 1
+            if result['ownerless']:
+                keyword_stats[keyword]['ownerless'] += 1
+            if result['open']:
+                keyword_stats[keyword]['open'] += 1
+            if result['active']:
+                keyword_stats[keyword]['active'] += 1
+        
+        output.write("| Keyword | Total | Ownerless | Open | Active | Success Rate |\n")
+        output.write("|---------|-------|-----------|------|--------|-------------|\n")
+        for keyword, stats in keyword_stats.items():
+            success_rate = (stats['ownerless']/stats['count']*100) if stats['count'] > 0 else 0
+            output.write(f"| {keyword} | {stats['count']} | {stats['ownerless']} | {stats['open']} | {stats['active']} | {success_rate:.1f}% |\n")
+        
+        output.write("\n## Recent Searches (Last 50)\n\n")
+        output.write("| Timestamp | Keyword | Name | Members | Ownerless | Open | Score |\n")
+        output.write("|-----------|---------|------|---------|-----------|------|-------|\n")
+        
+        recent_log = history_log[-50:]  # Last 50 entries
+        for result in recent_log:
+            output.write(f"| {result['timestamp']} | {result['keyword']} | {result['name']} | {result['members']} | {'✅' if result['ownerless'] else '❌'} | {'✅' if result['open'] else '❌'} | {result['score']:.1f} |\n")
+        
+        output.write("\n## Full Search Details\n\n")
+        for i, result in enumerate(recent_log, 1):
+            output.write(f"### {i}. {result['name']} (ID: {result['id']})\n")
+            output.write(f"- **Timestamp**: {result['timestamp']}\n")
+            output.write(f"- **Keyword**: {result['keyword']}\n")
+            output.write(f"- **Members**: {result['members']}\n")
+            output.write(f"- **Ownerless**: {'Yes' if result['ownerless'] else 'No'}\n")
+            output.write(f"- **Open to Join**: {'Yes' if result['open'] else 'No'}\n")
+            output.write(f"- **Unique Name**: {'Yes' if result['unique'] else 'No'}\n")
+            output.write(f"- **Active**: {'Yes' if result['active'] else 'No'}\n")
+            output.write(f"- **Score**: {result['score']:.1f}\n")
+            output.write(f"- **Shout**: {result['shout']}\n")
+            output.write(f"- **Description**: {result['description']}\n")
+            output.write(f"- **Link**: {result['link']}\n\n")
+    else:
+        output.write("No search history available.\n")
+    
+    output.seek(0)
+    return send_file(
+        io.BytesIO(output.getvalue().encode('utf-8')),
+        mimetype='text/markdown',
+        as_attachment=True,
+        download_name=f'search_history_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.md'
+    )
+
 @app.route('/export_logs', methods=['POST'])
 @admin_required(role="view")
 def export_logs():
@@ -922,6 +1061,63 @@ def export_logs():
         download_name='status_log.csv'
     )
 
-if __name__ == '__main__':
+@app.route('/export_logs_md', methods=['POST'])
+@admin_required(role="view")
+def export_logs_md():
+    output = io.StringIO()
+    
+    # Create markdown content
+    output.write("# Roblox Group Finder - Status Log\n\n")
+    output.write(f"*Generated on: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}*\n\n")
+    output.write(f"*Total log entries: {len(status_log)}*\n\n")
+    
+    if status_log:
+        # Count log types
+        error_count = len([log for log in status_log if 'error' in log.lower() or 'fail' in log.lower()])
+        success_count = len([log for log in status_log if 'success' in log.lower() or 'sent' in log.lower()])
+        warning_count = len([log for log in status_log if 'warning' in log.lower() or 'rate limit' in log.lower()])
+        
+        output.write("## Log Summary\n")
+        output.write(f"- **Total Entries**: {len(status_log)}\n")
+        output.write(f"- **Success Messages**: {success_count}\n")
+        output.write(f"- **Warning Messages**: {warning_count}\n")
+        output.write(f"- **Error Messages**: {error_count}\n\n")
+        
+        output.write("## Recent Log Entries (Last 100)\n\n")
+        output.write("| Timestamp | Message |\n")
+        output.write("|-----------|---------|\n")
+        
+        recent_logs = status_log[-100:]  # Last 100 entries
+        for log in recent_logs:
+            # Add appropriate emoji based on log type
+            emoji = "✅"
+            if 'error' in log.lower() or 'fail' in log.lower():
+                emoji = "❌"
+            elif 'warning' in log.lower() or 'rate limit' in log.lower():
+                emoji = "⚠️"
+            elif 'start' in log.lower() or 'login' in log.lower():
+                emoji = "🔒"
+            elif 'proxy' in log.lower():
+                emoji = "🔗"
+            
+            output.write(f"| {datetime.utcnow().isoformat()} | {emoji} {log} |\n")
+        
+        output.write("\n## Full Log Details\n\n")
+        for i, log in enumerate(recent_logs, 1):
+            output.write(f"{i}. **{datetime.utcnow().isoformat()}** - {log}\n")
+    else:
+        output.write("No log entries available.\n")
+    
+    output.seek(0)
+    return send_file(
+        io.BytesIO(output.getvalue().encode('utf-8')),
+        mimetype='text/markdown',
+        as_attachment=True,
+        download_name=f'status_log_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.md'
+    )
+
+# Start background tasks only if not on Vercel
+if not os.environ.get('VERCEL'):
     threading.Thread(target=background_tasks, daemon=True).start()
-    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+
+app = app
