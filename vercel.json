@@ -1,0 +1,30 @@
+{
+  "version": 2,
+  "framework": "flask",
+  "builds": [
+    {
+      "src": "app.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "app.py"
+    }
+  ],
+  "env": {
+    "SECRET_KEY": "your_secret_key",
+    "WEBHOOK_URL": "https://webhook.lewisakura.moe/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN/queue",
+    "SLACK_URL": "",
+    "TELEGRAM_ENABLED": "False",
+    "TELEGRAM_BOT_TOKEN": "",
+    "TELEGRAM_CHAT_ID": "",
+    "EMAIL_ENABLED": "False",
+    "EMAIL_SMTP_SERVER": "smtp.gmail.com",
+    "EMAIL_SMTP_PORT": "587",
+    "EMAIL_SENDER": "your_email@gmail.com",
+    "EMAIL_PASSWORD": "your_app_password",
+    "EMAIL_RECEIVER": "your_email@gmail.com"
+  }
+}
